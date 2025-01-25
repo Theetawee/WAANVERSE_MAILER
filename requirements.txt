@@ -5,8 +5,12 @@ charset-normalizer==3.4.1
 cryptography==44.0.0
 Django==5.1.5
 djangorestframework==3.15.2
+flake8==7.1.1
 idna==3.10
+mccabe==0.7.0
+pycodestyle==2.12.1
 pycparser==2.22
+pyflakes==3.2.0
 PyJWT==2.10.1
 pyotp==2.9.0
 requests==2.32.3
@@ -17,5 +21,5 @@ ua-parser==1.0.0
 ua-parser-builtins==0.18.0.post1
 urllib3==2.3.0
 user-agents==2.2.0
--e git+https://github.com/Theetawee/WAANVERSE_MAILER.git@67c3306ea4a47611c625a657679b2f477617b528#egg=waanverse_mailer
+-e git+https://github.com/Theetawee/WAANVERSE_MAILER.git@a03e173473275a595e3de51cc65d74a39f1189b4#egg=waanverse_mailer
 wheel==0.45.1
