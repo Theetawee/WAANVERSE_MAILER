@@ -36,7 +36,7 @@ class EmailConfig:
     MAX_TOTAL_RECIPIENTS = 100  # Maximum total recipients (To + CC + BCC)
 
 
-class EnhancedEmailService:
+class EmailService:
     """Advanced email service with comprehensive error handling and features."""
 
     def __init__(self, request=None):
