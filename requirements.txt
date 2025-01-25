@@ -21,5 +21,5 @@ ua-parser==1.0.0
 ua-parser-builtins==0.18.0.post1
 urllib3==2.3.0
 user-agents==2.2.0
--e git+https://github.com/Theetawee/WAANVERSE_MAILER.git@db7ba594b11f3abefe610db275187d4868ec7a0a#egg=waanverse_mailer
+-e git+https://github.com/Theetawee/WAANVERSE_MAILER.git@d31f9326ce3e58465e0672718fb427dd939ca3b1#egg=waanverse_mailer
 wheel==0.45.1
