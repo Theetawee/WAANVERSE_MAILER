@@ -1,0 +1,6 @@
+include LICENSE
+include README.md
+recursive-include waanverse_mailer/templates *
+recursive-exclude tests *
+include requirements.txt
+recursive-exclude demo *
