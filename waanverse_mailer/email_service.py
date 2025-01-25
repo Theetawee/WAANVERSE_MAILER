@@ -33,6 +33,7 @@ class EmailConfig:
     THREAD_POOL_SIZE = email_config.email_thread_pool_size
     MAX_EMAIL_BODY_SIZE = 10 * 1024 * 1024  # 10 MB limit
     TIMEOUT = 30  # Email connection timeout in seconds
+    MAX_TOTAL_RECIPIENTS = 100  # Maximum total recipients (To + CC + BCC)
 
 
 class EnhancedEmailService:
@@ -87,6 +88,25 @@ class EnhancedEmailService:
 
         return self._connection
 
+    def _validate_recipients(self, recipient_list: Union[str, List[str]]) -> List[str]:
+        """
+        Validate and normalize recipient list.
+
+        Args:
+            recipient_list: Recipients to validate
+
+        Returns:
+            List of valid email addresses
+        """
+        if isinstance(recipient_list, str):
+            recipient_list = [recipient_list]
+
+        # Remove duplicates and validate
+        unique_recipients = list(set(recipient_list))
+        valid_recipients = [r for r in unique_recipients if self.validate_email(r)]
+
+        return valid_recipients
+
     def parallel_email_send(
         self,
         subject: str,
@@ -95,6 +115,8 @@ class EnhancedEmailService:
         recipient_list: List[str],
         priority: str = "medium",
         attachments: Optional[List[str]] = None,
+        cc_list: Optional[List[str]] = None,
+        bcc_list: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Send emails in parallel with detailed tracking.
@@ -106,11 +128,13 @@ class EnhancedEmailService:
             recipient_list: List of recipients
             priority: Email priority
             attachments: List of attachment paths
+            cc_list: Carbon copy recipients
+            bcc_list: Blind carbon copy recipients
 
         Returns:
             Detailed result of email sending
         """
-        valid_recipients = [r for r in recipient_list if self.validate_email(r)]
+        valid_recipients = self._validate_recipients(recipient_list)
         results = {
             "total_recipients": len(recipient_list),
             "valid_recipients": len(valid_recipients),
@@ -129,6 +153,9 @@ class EnhancedEmailService:
                     [recipient],
                     priority,
                     attachments,
+                    True,
+                    cc_list,
+                    bcc_list,
                 ): recipient
                 for recipient in valid_recipients
             }
@@ -188,21 +215,89 @@ class EnhancedEmailService:
             logger.error(f"Transactional email failed: {e}")
             return False
 
-    class EmailThread(threading.Thread):
-        """Thread for asynchronous email sending."""
+    def send_batch_emails(
+        self,
+        template_name: str,
+        context: dict,
+        recipient_list: List[str],
+        subject: str,
+        priority: str = "medium",
+        attachments: Optional[List[str]] = None,
+        cc_list: Optional[List[str]] = None,
+        bcc_list: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Send batch emails using parallel sending method.
 
-        def __init__(self, service_instance, emails):
-            self.service = service_instance
-            self.emails = emails
-            super().__init__()
+        Returns:
+            Dictionary with email sending results
+        """
+        # Prepare batches of recipients
+        batched_recipients = [
+            recipient_list[i : i + self.config.BATCH_SIZE]
+            for i in range(0, len(recipient_list), self.config.BATCH_SIZE)
+        ]
 
-        def run(self):
-            """Execute email sending in thread."""
-            try:
-                with self.service.connection as connection:
-                    connection.send_messages(self.emails)
-            except Exception as e:
-                logger.error(f"Thread email sending failed: {str(e)}")
+        total_results = {
+            "total_recipients": len(recipient_list),
+            "successful_sends": 0,
+            "failed_sends": 0,
+            "failed_recipients": [],
+        }
+
+        # Process each batch in parallel
+        for batch in batched_recipients:
+            batch_results = self.parallel_email_send(
+                subject=subject,
+                template_name=template_name,
+                context=context,
+                recipient_list=batch,
+                priority=priority,
+                attachments=attachments,
+                cc_list=cc_list,
+                bcc_list=bcc_list,
+            )
+
+            # Aggregate results
+            total_results["successful_sends"] += batch_results["successful_sends"]
+            total_results["failed_sends"] += batch_results["failed_sends"]
+            total_results["failed_recipients"].extend(
+                batch_results["failed_recipients"]
+            )
+
+        return total_results
+
+    def retry_failed_emails(
+        self, failed_recipients: List[dict], retries: int = 3, delay: int = 5
+    ):
+        """
+        Retry sending emails for failed recipients.
+
+        Args:
+            failed_recipients: List of failed recipient dictionaries
+            retries: Number of retry attempts.
+            delay: Delay between retries in seconds.
+        """
+        for attempt in range(1, retries + 1):
+            for failed in failed_recipients[:]:  # Iterate over a copy
+                try:
+                    email_message = self.prepare_email_message(
+                        subject=failed.get("subject", "Retry Email"),
+                        template_name=failed.get("template_name", "default"),
+                        context=failed.get("context", {}),
+                        recipient_list=[failed["recipient"]],
+                    )
+                    email_message.send()
+                    failed_recipients.remove(failed)  # Remove if successful
+                    logger.info(
+                        f"Retried email sent successfully to {failed['recipient']}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Retry {attempt}/{retries} failed for {failed['recipient']}: {str(e)}"
+                    )
+            if failed_recipients:
+                time.sleep(delay)
 
     def prepare_email_message(
         self,
@@ -212,23 +307,40 @@ class EnhancedEmailService:
         recipient_list: Union[str, List[str]],
         priority: str = "medium",
         attachments: Optional[List] = None,
+        cc_list: Optional[Union[str, List[str]]] = None,
+        bcc_list: Optional[Union[str, List[str]]] = None,
     ) -> EmailMultiAlternatives:
         """
-        Prepare an email message with both HTML and plain text versions.
+        Prepare an email message with comprehensive recipient support.
 
         Args:
             subject: Email subject
-            template_name: Name of the template or EmailTemplate enum
+            template_name: Name of the template
             context: Context data for the template
-            recipient_list: List of recipient email addresses
+            recipient_list: Primary recipients
             priority: Email priority level
             attachments: List of attachment files
+            cc_list: Carbon copy recipients
+            bcc_list: Blind carbon copy recipients
 
         Returns:
             Prepared email message
         """
+        # Validate and normalize recipient lists
+        to_recipients = self._validate_recipients(recipient_list)
+        cc_recipients = self._validate_recipients(cc_list) if cc_list else []
+        bcc_recipients = self._validate_recipients(bcc_list) if bcc_list else []
+
+        # Check total recipient count
+        total_recipients = len(to_recipients) + len(cc_recipients) + len(bcc_recipients)
+        if total_recipients > self.config.MAX_TOTAL_RECIPIENTS:
+            raise ValueError(
+                f"Too many recipients (max {self.config.MAX_TOTAL_RECIPIENTS})"
+            )
+
         template_path = f"emails/{template_name}.html"
 
+        # Update context with standard platform information
         context.update(
             {
                 "site_name": email_config.platform_name,
@@ -238,17 +350,18 @@ class EnhancedEmailService:
             }
         )
 
+        # Render email content
         html_content = render_to_string(template_path, context)
         plain_content = strip_tags(html_content)
 
-        if isinstance(recipient_list, str):
-            recipient_list = [recipient_list]
-
+        # Create email message
         msg = EmailMultiAlternatives(
             subject=subject,
             body=plain_content,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            to=recipient_list,
+            to=to_recipients,
+            cc=cc_recipients,
+            bcc=bcc_recipients,
             connection=self.connection,
         )
 
@@ -275,41 +388,37 @@ class EnhancedEmailService:
         priority: str = "medium",
         attachments: Optional[List] = None,
         async_send: bool = True,
+        cc_list: Optional[Union[str, List[str]]] = None,
+        bcc_list: Optional[Union[str, List[str]]] = None,
     ) -> bool:
         """
-        Send an email with proper error handling and logging.
+        Send an email with comprehensive recipient and threading support.
 
         Args:
             subject: Email subject
-            template_name: Template name or EmailTemplate enum
-                The template name should be without the .html extension found in the base folder template folder this will resolve to emails/{template_name}.html
+            template_name: Template name
             context: Template context
-            recipient_list: Recipients
-                Can be a string or a list of strings
+            recipient_list: Primary recipients
             priority: Email priority
-                EmailPriority.HIGH, MEDIUM, LOW
             attachments: Email attachments
             async_send: Whether to send asynchronously
-        The following context variables are available:
-            site_name: Platform name
-            company_address: Platform address
-            support_email: Platform support email
+            cc_list: Carbon copy recipients
+            bcc_list: Blind carbon copy recipients
+
         Returns:
             bool: Whether the email was sent successfully
         """
         try:
-            # Validate recipients
-            if isinstance(recipient_list, str):
-                recipient_list = [recipient_list]
-
-            if len(recipient_list) > self.config.MAX_RECIPIENTS:
-                raise ValueError(
-                    f"Too many recipients (max {self.config.MAX_RECIPIENTS})"
-                )
-
-            # Prepare email message
+            # Prepare email message with all recipient types
             email_message = self.prepare_email_message(
-                subject, template_name, context, recipient_list, priority, attachments
+                subject,
+                template_name,
+                context,
+                recipient_list,
+                priority,
+                attachments,
+                cc_list,
+                bcc_list,
             )
 
             # Send email
@@ -318,8 +427,14 @@ class EnhancedEmailService:
             else:
                 email_message.send()
 
+            # Log successful send
+            total_recipients = (
+                len(recipient_list)
+                + (len(cc_list) if cc_list else 0)
+                + (len(bcc_list) if bcc_list else 0)
+            )
             logger.info(
-                f"Email sent successfully to {len(recipient_list)} recipients: {subject}"
+                f"Email sent successfully to {total_recipients} recipients: {subject}"
             )
             return True
 
@@ -335,74 +450,18 @@ class EnhancedEmailService:
             )
             return False
 
-    def send_batch_emails(
-        self,
-        template_name: str,
-        context: dict,
-        recipient_list: List[str],
-        subject: str,
-    ) -> tuple[int, int, List[dict]]:
-        """
-        Send batch emails with logging of failed recipients.
+    class EmailThread(threading.Thread):
+        """Thread for asynchronous email sending."""
 
-        Returns:
-            tuple: (success_count, failure_count, failed_recipients)
-        """
-        success_count = 0
-        failure_count = 0
-        failed_recipients = []
+        def __init__(self, service_instance, emails):
+            self.service = service_instance
+            self.emails = emails
+            super().__init__()
 
-        for i in range(0, len(recipient_list), self.config.BATCH_SIZE):
-            batch = recipient_list[i : i + self.config.BATCH_SIZE]
-            messages = [
-                self.prepare_email_message(subject, template_name, context, [recipient])
-                for recipient in batch
-            ]
-
+        def run(self):
+            """Execute email sending in thread."""
             try:
-                with self.connection as connection:
-                    connection.send_messages(messages)
-                success_count += len(batch)
+                with self.service.connection as connection:
+                    connection.send_messages(self.emails)
             except Exception as e:
-                logger.error(f"Batch email sending failed for {batch}: {str(e)}")
-                failure_count += len(batch)
-                # Log individual failures
-                failed_recipients.extend(
-                    {"recipient": recipient, "error": str(e)} for recipient in batch
-                )
-
-        return success_count, failure_count, failed_recipients
-
-    def retry_failed_emails(
-        self, failed_recipients: List[dict], retries: int = 3, delay: int = 5
-    ):
-        """
-        Retry sending emails for failed recipients.
-
-        Args:
-            failed_recipients: List of failed recipient dictionaries with `recipient` and `error` keys.
-            retries: Number of retry attempts.
-            delay: Delay between retries in seconds.
-        """
-        for attempt in range(1, retries + 1):
-            for failed in failed_recipients[
-                :
-            ]:  # Iterate over a copy to modify the list
-                try:
-                    email_message = self.prepare_email_message(
-                        subject=failed["subject"],
-                        template_name=failed["template_name"],
-                        context=failed["context"],
-                        recipient_list=[failed["recipient"]],
-                    )
-                    email_message.send()
-                    failed_recipients.remove(failed)  # Remove if successful
-                    logger.info(
-                        f"Retried email sent successfully to {failed['recipient']}"
-                    )
-                except Exception as e:
-                    logger.error(
-                        f"Retry {attempt}/{retries} failed for {failed['recipient']}: {str(e)}"
-                    )
-            if failed_recipients:
-                time.sleep(delay)
+                logger.error(f"Thread email sending failed: {str(e)}")

@@ -36,9 +36,6 @@ class EmailConfig:
         """Validate the complete configuration."""
         self._validate_email_settings()
 
-        if self.use_unfold:
-            self._validate_unfold_installation()
-
     @staticmethod
     def _validate_email_settings() -> None:
         """Validate required email settings."""
